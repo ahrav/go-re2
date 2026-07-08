@@ -41,10 +41,49 @@ var (
 	rootMod      api.Module
 
 	wasmInitOnce sync.Once
-	modPool      []*childModule // LIFO pool of reusable child modules
-	modPoolMu    sync.Mutex
 	modCreateMu  sync.Mutex
+
+	// modShards is a per-P sharded free-list of reusable child modules. A single
+	// global LIFO mutex serialized every acquire/release; with per-op wasm
+	// malloc/free now eliminated (persistent scratch buffers), that pool mutex is
+	// the dominant remaining contention point (CPU profile: ~35% at 32 cores).
+	// Sharding by the running P (procPin) sends distinct cores to distinct
+	// shards, so each shard's mutex is effectively always uncontended. Modules
+	// are interchangeable (shared linear memory; differ only in stack/TLS +
+	// their own scratch buffer), so a module acquired from one shard may be
+	// returned to another after goroutine migration — harmless. Like the old
+	// LIFO, shards never drop modules, so the childModule finalizer (which frees
+	// TLS + scratch and closes the module) never runs while a module is live —
+	// the invariant a plain sync.Pool violates by dropping idle entries on GC.
+	modShards   []modShard
+	numModShard int
 )
+
+// modShard is one per-P free-list, padded so adjacent shards never share a
+// cache line (false sharing would reintroduce the very cross-core traffic the
+// sharding removes).
+type modShard struct {
+	mu   sync.Mutex
+	free []*childModule
+	_    [128 - (unsafe.Sizeof(sync.Mutex{})+unsafe.Sizeof([]*childModule(nil)))%128]byte
+}
+
+//go:linkname runtime_procPin runtime.procPin
+func runtime_procPin() int
+
+//go:linkname runtime_procUnpin runtime.procUnpin
+func runtime_procUnpin()
+
+// shardIndex returns the current P's shard index. The pin window is only long
+// enough to read the P id.
+func shardIndex() int {
+	pid := runtime_procPin()
+	runtime_procUnpin()
+	if numModShard == 0 {
+		return 0
+	}
+	return pid % numModShard
+}
 
 type libre2ABI struct {
 	cre2New                   lazyFunction
@@ -195,25 +234,51 @@ func getChildModule(ctx context.Context) *childModule {
 }
 
 func putChildModule(cm *childModule) {
-	modPoolMu.Lock()
-	modPool = append(modPool, cm)
-	modPoolMu.Unlock()
+	s := &modShards[shardIndex()]
+	s.mu.Lock()
+	s.free = append(s.free, cm)
+	s.mu.Unlock()
 }
 
+// popChildModule pops from the current P's shard first (the common, uncontended
+// case), then steals from other shards so a module freed on a different P is
+// still reused rather than forcing a fresh, expensive instantiation.
 func popChildModule() *childModule {
-	modPoolMu.Lock()
-	defer modPoolMu.Unlock()
-	n := len(modPool)
+	start := shardIndex()
+
+	if cm := modShards[start].tryPop(); cm != nil {
+		return cm
+	}
+	for off := 1; off < numModShard; off++ {
+		if cm := modShards[(start+off)%numModShard].tryPop(); cm != nil {
+			return cm
+		}
+	}
+	return nil
+}
+
+func (s *modShard) tryPop() *childModule {
+	s.mu.Lock()
+	n := len(s.free)
 	if n == 0 {
+		s.mu.Unlock()
 		return nil
 	}
-	cm := modPool[n-1]
-	modPool[n-1] = nil
-	modPool = modPool[:n-1]
+	cm := s.free[n-1]
+	s.free[n-1] = nil
+	s.free = s.free[:n-1]
+	s.mu.Unlock()
 	return cm
 }
 
 func initWASM(ctx context.Context) {
+	// One shard per P so the common case is a P hitting its own private shard.
+	numModShard = runtime.GOMAXPROCS(0)
+	if numModShard < 1 {
+		numModShard = 1
+	}
+	modShards = make([]modShard, numModShard)
+
 	ctx = experimental.WithMemoryAllocator(ctx, allocator.NewNonMoving())
 
 	rtCfg := wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesThreads)
