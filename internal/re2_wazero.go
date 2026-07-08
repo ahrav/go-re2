@@ -84,6 +84,39 @@ type childModule struct {
 	mod        api.Module
 	tlsBasePtr uint32
 	functions  map[string]api.Function
+
+	// scratchPtr/scratchLen is a persistent per-module scratch buffer in the
+	// shared wasm linear memory. Every operation used to malloc a fresh buffer
+	// (for the input string + match-result array) and free it at the end — two
+	// wasm calls into the ONE shared C heap allocator per operation. Under 32
+	// cores that shared allocator was the real serialization point (CPU profile:
+	// malloc+free = ~37% cumulative, and the global pool mutex was accidentally
+	// rate-limiting access to it). Instead each module keeps one scratch buffer,
+	// grown geometrically on demand and never shrunk, so steady-state operations
+	// do ZERO wasm malloc/free. A module is exclusively owned by one goroutine
+	// between pool Get and Put, so its scratch buffer is single-owner while in
+	// use — no aliasing across goroutines.
+	scratchPtr uint32
+	scratchLen uint32
+}
+
+// ensureScratch guarantees the module's scratch buffer is at least size bytes,
+// growing geometrically (so total regrows over a module's life are O(log size))
+// and never shrinking. The grow path is the only place this design touches the
+// shared wasm heap, and it runs at most O(log maxInputSize) times per module.
+func (cm *childModule) ensureScratch(abi *libre2ABI, size uint32) {
+	if size <= cm.scratchLen {
+		return
+	}
+	newLen := size
+	if grown := cm.scratchLen * 2; grown > newLen {
+		newLen = grown
+	}
+	if cm.scratchLen > 0 {
+		freeOn(abi, cm, wasmPtr(cm.scratchPtr))
+	}
+	cm.scratchPtr = uint32(mallocOn(abi, cm, newLen))
+	cm.scratchLen = newLen
 }
 
 func createChildModule(ctx context.Context, rt wazero.Runtime, root api.Module) *childModule {
@@ -131,6 +164,11 @@ func createChildModule(ctx context.Context, rt wazero.Runtime, root api.Module) 
 	runtime.SetFinalizer(ret, func(obj interface{}) {
 		if cm, ok := obj.(*childModule); ok {
 			free := cm.mod.ExportedFunction("free")
+			if cm.scratchLen > 0 {
+				if _, err := free.Call(ctx, uint64(cm.scratchPtr)); err != nil {
+					panic(err)
+				}
+			}
 			if _, err := free.Call(ctx, uint64(cm.tlsBasePtr)); err != nil {
 				panic(err)
 			}
@@ -361,9 +399,9 @@ func release(re *Regexp) {
 	deleteRE(re.abi, re.ptr)
 }
 
-func match(re *Regexp, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
+func match(alloc *allocation, re *Regexp, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
 	ctx := context.Background()
-	res, err := re.abi.cre2Match.Call8(ctx, uint64(re.ptr), uint64(s.ptr), uint64(s.length), 0, uint64(s.length), 0, uint64(matchesPtr), uint64(nMatches))
+	res, err := re.abi.cre2Match.Call8On(ctx, alloc.mod, uint64(re.ptr), uint64(s.ptr), uint64(s.length), 0, uint64(s.length), 0, uint64(matchesPtr), uint64(nMatches))
 	if err != nil {
 		panic(err)
 	}
@@ -371,9 +409,9 @@ func match(re *Regexp, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
 	return res == 1
 }
 
-func matchFrom(re *Regexp, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
+func matchFrom(alloc *allocation, re *Regexp, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
 	ctx := context.Background()
-	res, err := re.abi.cre2Match.Call8(ctx, uint64(re.ptr), uint64(s.ptr), uint64(s.length), uint64(startPos), uint64(s.length), 0, uint64(matchesPtr), uint64(nMatches))
+	res, err := re.abi.cre2Match.Call8On(ctx, alloc.mod, uint64(re.ptr), uint64(s.ptr), uint64(s.length), uint64(startPos), uint64(s.length), 0, uint64(matchesPtr), uint64(nMatches))
 	if err != nil {
 		panic(err)
 	}
@@ -585,6 +623,22 @@ func free(abi *libre2ABI, ptr wasmPtr) {
 	}
 }
 
+// mallocOn / freeOn run on a specific pinned module (no pool op). Used only by
+// the module's own scratch-buffer grow path.
+func mallocOn(abi *libre2ABI, mod *childModule, size uint32) wasmPtr {
+	if res, err := abi.malloc.Call1On(context.Background(), mod, uint64(size)); err != nil {
+		panic(err)
+	} else {
+		return wasmPtr(res)
+	}
+}
+
+func freeOn(abi *libre2ABI, mod *childModule, ptr wasmPtr) {
+	if _, err := abi.free.Call1On(context.Background(), mod, uint64(ptr)); err != nil {
+		panic(err)
+	}
+}
+
 func copyCString(ptr wasmPtr) string {
 	res := strings.Builder{}
 	for {
@@ -606,20 +660,30 @@ type allocation struct {
 	bufPtr  wasmPtr
 	nextIdx uint32
 	abi     *libre2ABI
+	// mod is the child module pinned for this operation's lifetime. All wasm
+	// calls in the operation (match, and any cold-path opt calls) run on it via
+	// the *On helpers, and the operation's bump-allocation buffer is this
+	// module's persistent scratch — so a steady-state operation performs no wasm
+	// malloc/free at all and touches the module pool exactly twice.
+	mod *childModule
 }
 
 func (abi *libre2ABI) reserve(size uint32) allocation {
-	ptr := malloc(abi, size)
+	mod := getChildModule(context.Background())
+	mod.ensureScratch(abi, size)
 	return allocation{
 		size:    size,
-		bufPtr:  ptr,
+		bufPtr:  wasmPtr(mod.scratchPtr),
 		nextIdx: 0,
 		abi:     abi,
+		mod:     mod,
 	}
 }
 
 func (a *allocation) free() {
-	free(a.abi, a.bufPtr)
+	// The scratch buffer stays allocated on the module for reuse; we only return
+	// the module to the pool. No wasm free on the hot path.
+	putChildModule(a.mod)
 }
 
 func (a *allocation) allocate(size uint32) wasmPtr {
@@ -733,7 +797,13 @@ func (f *lazyFunction) Call8(ctx context.Context, arg1 uint64, arg2 uint64, arg3
 func (f *lazyFunction) callWithStack(ctx context.Context, callStack []uint64) (uint64, error) {
 	modH := getChildModule(ctx)
 	defer putChildModule(modH)
+	return f.callWithStackOn(ctx, modH, callStack)
+}
 
+// callWithStackOn runs the function on an already-acquired child module,
+// skipping the pool Get/Put. Used on the hot path where the operation has
+// pinned one module for its whole lifetime (see allocation.mod).
+func (f *lazyFunction) callWithStackOn(ctx context.Context, modH *childModule, callStack []uint64) (uint64, error) {
 	fun := modH.functions[f.name]
 	if fun == nil {
 		fun = modH.mod.ExportedFunction(f.name)
@@ -744,4 +814,25 @@ func (f *lazyFunction) callWithStack(ctx context.Context, callStack []uint64) (u
 		return 0, fmt.Errorf("re2_wazero: calling function: %w", err)
 	}
 	return callStack[0], nil
+}
+
+// Call1On / Call8On are the pinned-module counterparts of Call1 / Call8 for the
+// hot path, avoiding a pool Get/Put per wasm call.
+func (f *lazyFunction) Call1On(ctx context.Context, modH *childModule, arg1 uint64) (uint64, error) {
+	var callStack [1]uint64
+	callStack[0] = arg1
+	return f.callWithStackOn(ctx, modH, callStack[:])
+}
+
+func (f *lazyFunction) Call8On(ctx context.Context, modH *childModule, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8 uint64) (uint64, error) {
+	var callStack [8]uint64
+	callStack[0] = arg1
+	callStack[1] = arg2
+	callStack[2] = arg3
+	callStack[3] = arg4
+	callStack[4] = arg5
+	callStack[5] = arg6
+	callStack[6] = arg7
+	callStack[7] = arg8
+	return f.callWithStackOn(ctx, modH, callStack[:])
 }

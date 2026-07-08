@@ -264,7 +264,7 @@ func (re *Regexp) find(alloc *allocation, cs cString, dstCap []int) []int {
 	matchArr := alloc.newCStringArray(1)
 	defer matchArr.free()
 
-	res := match(re, cs, matchArr.ptr, 1)
+	res := match(alloc, re, cs, matchArr.ptr, 1)
 	if !res {
 		return nil
 	}
@@ -371,7 +371,7 @@ func (re *Regexp) findAll(alloc *allocation, bsrc []byte, src string, cs cString
 	prevMatchEnd := -1
 	pos := 0
 	for pos < cs.length+1 {
-		if !matchFrom(re, cs, pos, matchArr.ptr, 1) {
+		if !matchFrom(alloc, re, cs, pos, matchArr.ptr, 1) {
 			break
 		}
 
@@ -503,7 +503,7 @@ func (re *Regexp) findAllSubmatch(alloc *allocation, bsrc []byte, src string, cs
 	prevMatchEnd := -1
 	pos := 0
 	for pos < cs.length+1 {
-		if !matchFrom(re, cs, pos, matchArr.ptr, uint32(nmatch)) {
+		if !matchFrom(alloc, re, cs, pos, matchArr.ptr, uint32(nmatch)) {
 			break
 		}
 
@@ -628,7 +628,7 @@ func (re *Regexp) findSubmatch(alloc *allocation, cs cString, deliver func(match
 	matchArr := alloc.newCStringArray(numGroups)
 	defer matchArr.free()
 
-	if !match(re, cs, matchArr.ptr, uint32(numGroups)) {
+	if !match(alloc, re, cs, matchArr.ptr, uint32(numGroups)) {
 		return
 	}
 
@@ -759,7 +759,7 @@ func (re *Regexp) Match(b []byte) bool {
 	defer re.abi.endOperation(alloc)
 
 	cs := alloc.newCStringFromBytes(b)
-	res := match(re, cs, nilWasmPtr, 0)
+	res := match(&alloc, re, cs, nilWasmPtr, 0)
 	runtime.KeepAlive(b)
 
 	runtime.KeepAlive(re) // don't allow finalizer to run during method
@@ -774,7 +774,7 @@ func (re *Regexp) MatchString(s string) bool {
 	defer re.abi.endOperation(alloc)
 
 	cs := alloc.newCString(s)
-	res := match(re, cs, nilWasmPtr, 0)
+	res := match(&alloc, re, cs, nilWasmPtr, 0)
 	runtime.KeepAlive(s)
 
 	runtime.KeepAlive(re) // don't allow finalizer to run during method
