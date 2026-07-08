@@ -137,6 +137,18 @@ type childModule struct {
 	// use — no aliasing across goroutines.
 	scratchPtr uint32
 	scratchLen uint32
+
+	// callStack is a reusable argument buffer for wasm calls. wazero's
+	// Function.CallWithStack takes a []uint64 and is treated by escape analysis
+	// as retaining it, so a fresh `var callStack [N]uint64; f(callStack[:])` per
+	// call escapes to the heap — the single largest hot-path allocation (~99% of
+	// per-op allocs in the profile). Because a module is exclusively owned by one
+	// goroutine between pool Get and Put, one buffer on the module can back every
+	// call in the operation with zero per-call allocation. Sized 8 (the widest
+	// call, cre2_match). CallWithStack only reads args in and writes results back
+	// into the same buffer within the call, so reuse across sequential calls in
+	// one operation is safe.
+	callStack [8]uint64
 }
 
 // ensureScratch guarantees the module's scratch buffer is at least size bytes,
@@ -882,22 +894,24 @@ func (f *lazyFunction) callWithStackOn(ctx context.Context, modH *childModule, c
 }
 
 // Call1On / Call8On are the pinned-module counterparts of Call1 / Call8 for the
-// hot path, avoiding a pool Get/Put per wasm call.
+// hot path. They back the wasm arg/result buffer with the module's own reusable
+// callStack (the module is exclusively owned for the operation) so no per-call
+// slice escapes to the Go heap.
 func (f *lazyFunction) Call1On(ctx context.Context, modH *childModule, arg1 uint64) (uint64, error) {
-	var callStack [1]uint64
-	callStack[0] = arg1
-	return f.callWithStackOn(ctx, modH, callStack[:])
+	cs := modH.callStack[:1]
+	cs[0] = arg1
+	return f.callWithStackOn(ctx, modH, cs)
 }
 
 func (f *lazyFunction) Call8On(ctx context.Context, modH *childModule, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8 uint64) (uint64, error) {
-	var callStack [8]uint64
-	callStack[0] = arg1
-	callStack[1] = arg2
-	callStack[2] = arg3
-	callStack[3] = arg4
-	callStack[4] = arg5
-	callStack[5] = arg6
-	callStack[6] = arg7
-	callStack[7] = arg8
-	return f.callWithStackOn(ctx, modH, callStack[:])
+	cs := modH.callStack[:8]
+	cs[0] = arg1
+	cs[1] = arg2
+	cs[2] = arg3
+	cs[3] = arg4
+	cs[4] = arg5
+	cs[5] = arg6
+	cs[6] = arg7
+	cs[7] = arg8
+	return f.callWithStackOn(ctx, modH, cs)
 }
