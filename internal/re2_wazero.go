@@ -84,6 +84,17 @@ type childModule struct {
 	mod        api.Module
 	tlsBasePtr uint32
 	functions  map[string]api.Function
+
+	// Pre-resolved hot-path functions to avoid per-call map lookups.
+	fnMalloc api.Function
+	fnFree   api.Function
+	fnMatch  api.Function
+
+	// Persistent scratch arena in wasm linear memory, reused across
+	// operations. Grown geometrically; owned exclusively by the goroutine
+	// holding this module.
+	scratchPtr  uint32
+	scratchSize uint32
 }
 
 func createChildModule(ctx context.Context, rt wazero.Runtime, root api.Module) *childModule {
@@ -127,10 +138,18 @@ func createChildModule(ctx context.Context, rt wazero.Runtime, root api.Module) 
 		mod:        child,
 		tlsBasePtr: ptr,
 		functions:  map[string]api.Function{},
+		fnMalloc:   child.ExportedFunction("malloc"),
+		fnFree:     child.ExportedFunction("free"),
+		fnMatch:    child.ExportedFunction("cre2_match"),
 	}
 	runtime.SetFinalizer(ret, func(obj interface{}) {
 		if cm, ok := obj.(*childModule); ok {
 			free := cm.mod.ExportedFunction("free")
+			if cm.scratchPtr != 0 {
+				if _, err := free.Call(ctx, uint64(cm.scratchPtr)); err != nil {
+					panic(err)
+				}
+			}
 			if _, err := free.Call(ctx, uint64(cm.tlsBasePtr)); err != nil {
 				panic(err)
 			}
@@ -138,6 +157,34 @@ func createChildModule(ctx context.Context, rt wazero.Runtime, root api.Module) 
 		}
 	})
 	return ret
+}
+
+// ensureScratch guarantees the module's persistent scratch arena holds at
+// least size bytes, growing geometrically to amortize wasm malloc calls.
+func (cm *childModule) ensureScratch(ctx context.Context, size uint32) {
+	if cm.scratchPtr != 0 && cm.scratchSize >= size {
+		return
+	}
+	newSize := cm.scratchSize * 2
+	if newSize < size {
+		newSize = size
+	}
+	if newSize < 4096 {
+		newSize = 4096
+	}
+	var stack [1]uint64
+	if cm.scratchPtr != 0 {
+		stack[0] = uint64(cm.scratchPtr)
+		if err := cm.fnFree.CallWithStack(ctx, stack[:]); err != nil {
+			panic(err)
+		}
+	}
+	stack[0] = uint64(newSize)
+	if err := cm.fnMalloc.CallWithStack(ctx, stack[:]); err != nil {
+		panic(err)
+	}
+	cm.scratchPtr = uint32(stack[0])
+	cm.scratchSize = newSize
 }
 
 func getChildModule(ctx context.Context) *childModule {
@@ -264,11 +311,21 @@ func newABI() *libre2ABI {
 }
 
 func (abi *libre2ABI) startOperation(memorySize int) allocation {
-	return abi.reserve(uint32(memorySize))
+	// Check the child module out for the whole operation: all wasm calls in
+	// the operation go through it directly, and its persistent scratch arena
+	// replaces per-operation malloc/free.
+	ctx := context.Background()
+	cm := getChildModule(ctx)
+	cm.ensureScratch(ctx, uint32(memorySize))
+	return allocation{
+		size:   uint32(memorySize),
+		bufPtr: wasmPtr(cm.scratchPtr),
+		cm:     cm,
+	}
 }
 
 func (abi *libre2ABI) endOperation(a allocation) {
-	a.free()
+	putChildModule(a.cm)
 }
 
 func newRE(abi *libre2ABI, pattern cString, opts CompileOptions) wasmPtr {
@@ -361,24 +418,38 @@ func release(re *Regexp) {
 	deleteRE(re.abi, re.ptr)
 }
 
-func match(re *Regexp, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
-	ctx := context.Background()
-	res, err := re.abi.cre2Match.Call8(ctx, uint64(re.ptr), uint64(s.ptr), uint64(s.length), 0, uint64(s.length), 0, uint64(matchesPtr), uint64(nMatches))
-	if err != nil {
+func match(re *Regexp, alloc *allocation, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
+	// Call through the operation's checked-out module directly: avoids a
+	// second pool pop/push and function-map lookup per match call.
+	var callStack [8]uint64
+	callStack[0] = uint64(re.ptr)
+	callStack[1] = uint64(s.ptr)
+	callStack[2] = uint64(s.length)
+	callStack[3] = 0
+	callStack[4] = uint64(s.length)
+	callStack[5] = 0
+	callStack[6] = uint64(matchesPtr)
+	callStack[7] = uint64(nMatches)
+	if err := alloc.cm.fnMatch.CallWithStack(context.Background(), callStack[:]); err != nil {
 		panic(err)
 	}
-
-	return res == 1
+	return callStack[0] == 1
 }
 
-func matchFrom(re *Regexp, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
-	ctx := context.Background()
-	res, err := re.abi.cre2Match.Call8(ctx, uint64(re.ptr), uint64(s.ptr), uint64(s.length), uint64(startPos), uint64(s.length), 0, uint64(matchesPtr), uint64(nMatches))
-	if err != nil {
+func matchFrom(re *Regexp, alloc *allocation, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
+	var callStack [8]uint64
+	callStack[0] = uint64(re.ptr)
+	callStack[1] = uint64(s.ptr)
+	callStack[2] = uint64(s.length)
+	callStack[3] = uint64(startPos)
+	callStack[4] = uint64(s.length)
+	callStack[5] = 0
+	callStack[6] = uint64(matchesPtr)
+	callStack[7] = uint64(nMatches)
+	if err := alloc.cm.fnMatch.CallWithStack(context.Background(), callStack[:]); err != nil {
 		panic(err)
 	}
-
-	return res == 1
+	return callStack[0] == 1
 }
 
 func readMatch(alloc *allocation, cs cString, matchPtr wasmPtr, dstCap []int) []int {
@@ -605,21 +676,7 @@ type allocation struct {
 	size    uint32
 	bufPtr  wasmPtr
 	nextIdx uint32
-	abi     *libre2ABI
-}
-
-func (abi *libre2ABI) reserve(size uint32) allocation {
-	ptr := malloc(abi, size)
-	return allocation{
-		size:    size,
-		bufPtr:  ptr,
-		nextIdx: 0,
-		abi:     abi,
-	}
-}
-
-func (a *allocation) free() {
-	free(a.abi, a.bufPtr)
+	cm      *childModule
 }
 
 func (a *allocation) allocate(size uint32) wasmPtr {

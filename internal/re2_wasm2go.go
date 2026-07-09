@@ -214,7 +214,7 @@ func release(re *Regexp) {
 	deleteRE(re.abi, re.ptr)
 }
 
-func match(re *Regexp, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
+func match(re *Regexp, _ *allocation, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
 	res := withModule(func(m *wasm2go.Module) uint64 {
 		return uint64(m.Xcre2_match(int32(re.ptr), int32(s.ptr), int32(s.length), 0, int32(s.length), 0, int32(matchesPtr), int32(nMatches)))
 	})
@@ -222,7 +222,7 @@ func match(re *Regexp, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
 	return res == 1
 }
 
-func matchFrom(re *Regexp, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
+func matchFrom(re *Regexp, _ *allocation, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
 	res := withModule(func(m *wasm2go.Module) uint64 {
 		return uint64(m.Xcre2_match(int32(re.ptr), int32(s.ptr), int32(s.length), int32(startPos), int32(s.length), 0, int32(matchesPtr), int32(nMatches)))
 	})
