@@ -147,16 +147,25 @@ func FuzzScratchSelfConsistency(f *testing.F) {
 
 		// Adversarial schedule: pollute with big, then re-run each input; also
 		// run each input back-to-back (idempotence). Every result must match the
-		// reference captured above.
-		schedule := []string{big, a, a, b, big, c, "", b, big, a}
-		for _, in := range schedule {
-			if in == big {
-				_ = query(re, in) // pollute; big's own result need not be in reference
+		// reference captured above. Pollution slots are marked explicitly rather
+		// than by value equality: when big == a (empty or >=4096-byte a), a
+		// value check would silently skip the reference input's own comparison.
+		type step struct {
+			in      string
+			pollute bool
+		}
+		schedule := []step{
+			{big, true}, {a, false}, {a, false}, {b, false}, {big, true},
+			{c, false}, {"", false}, {b, false}, {big, true}, {a, false},
+		}
+		for _, s := range schedule {
+			if s.pollute {
+				_ = query(re, s.in) // pollute; big's own result need not be in reference
 				continue
 			}
-			got := query(re, in)
-			if !got.equal(reference[in]) {
-				t.Fatalf("result for input %q changed after preceding op (scratch/module reuse bug); pat=%q", in, pat)
+			got := query(re, s.in)
+			if !got.equal(reference[s.in]) {
+				t.Fatalf("result for input %q changed after preceding op (scratch/module reuse bug); pat=%q", s.in, pat)
 			}
 		}
 	})

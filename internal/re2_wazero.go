@@ -172,18 +172,25 @@ func (cm *childModule) ensureScratch(ctx context.Context, size uint32) {
 	if newSize < 4096 {
 		newSize = 4096
 	}
+	// Allocate the replacement arena before releasing the old one. If the
+	// grow fails, cm is left untouched — still pointing at a valid arena —
+	// instead of stranding cm.scratchPtr on freed memory. The latter would be
+	// double-freed by the finalizer once a panic here drops this module (the
+	// caller's deferred endOperation is not yet registered when startOperation
+	// panics, so the module never returns to the pool and is GC-finalized).
 	var stack [1]uint64
+	stack[0] = uint64(newSize)
+	if err := cm.fnMalloc.CallWithStack(ctx, stack[:]); err != nil {
+		panic(err)
+	}
+	newPtr := uint32(stack[0])
 	if cm.scratchPtr != 0 {
 		stack[0] = uint64(cm.scratchPtr)
 		if err := cm.fnFree.CallWithStack(ctx, stack[:]); err != nil {
 			panic(err)
 		}
 	}
-	stack[0] = uint64(newSize)
-	if err := cm.fnMalloc.CallWithStack(ctx, stack[:]); err != nil {
-		panic(err)
-	}
-	cm.scratchPtr = uint32(stack[0])
+	cm.scratchPtr = newPtr
 	cm.scratchSize = newSize
 }
 
