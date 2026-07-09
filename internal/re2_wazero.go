@@ -144,13 +144,12 @@ func createChildModule(ctx context.Context, rt wazero.Runtime, root api.Module) 
 	}
 	runtime.SetFinalizer(ret, func(obj interface{}) {
 		if cm, ok := obj.(*childModule); ok {
-			free := cm.mod.ExportedFunction("free")
 			if cm.scratchPtr != 0 {
-				if _, err := free.Call(ctx, uint64(cm.scratchPtr)); err != nil {
+				if _, err := cm.fnFree.Call(ctx, uint64(cm.scratchPtr)); err != nil {
 					panic(err)
 				}
 			}
-			if _, err := free.Call(ctx, uint64(cm.tlsBasePtr)); err != nil {
+			if _, err := cm.fnFree.Call(ctx, uint64(cm.tlsBasePtr)); err != nil {
 				panic(err)
 			}
 			_ = cm.mod.Close(context.Background()) //nolint:contextcheck // don't want to capture in a finalizer
