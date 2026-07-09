@@ -184,6 +184,13 @@ func (cm *childModule) ensureScratch(ctx context.Context, size uint32) {
 		panic(err)
 	}
 	newPtr := uint32(stack[0])
+	if newPtr == 0 {
+		// wasi-libc's malloc returns 0 (it does not trap) when it cannot grow
+		// linear memory past --max-memory. Fail before freeing the old arena so
+		// cm keeps pointing at a valid buffer, rather than committing a 0
+		// pointer that a later allocate() would write through at offset 0.
+		panic("re2: scratch arena allocation failed (out of wasm memory)")
+	}
 	if cm.scratchPtr != 0 {
 		stack[0] = uint64(cm.scratchPtr)
 		if err := cm.fnFree.CallWithStack(ctx, stack[:]); err != nil {

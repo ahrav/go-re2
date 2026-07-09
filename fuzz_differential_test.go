@@ -155,8 +155,16 @@ func FuzzScratchSelfConsistency(f *testing.F) {
 			pollute bool
 		}
 		schedule := []step{
-			{big, true}, {a, false}, {a, false}, {b, false}, {big, true},
-			{c, false}, {"", false}, {b, false}, {big, true}, {a, false},
+			{big, true},
+			{a, false},
+			{a, false},
+			{b, false},
+			{big, true},
+			{c, false},
+			{"", false},
+			{b, false},
+			{big, true},
+			{a, false},
 		}
 		for _, s := range schedule {
 			if s.pollute {
