@@ -40,10 +40,22 @@ var (
 	rootMod      api.Module
 
 	wasmInitOnce sync.Once
-	modPool      []*childModule // LIFO pool of reusable child modules
-	modPoolMu    sync.Mutex
+	modPools     [modPoolStripes]modPoolStripe // striped LIFO pools of reusable child modules
+	nextStripe   uint32
 	modCreateMu  sync.Mutex
 )
+
+// modPoolStripes spreads pool traffic over several mutexes so 32+ concurrent
+// scanners don't serialize on a single lock. Modules are never dropped from
+// the pools: the childModule finalizer frees the wasm-side TLS/stack region,
+// which must not race with live wasm execution (see upstream #229).
+const modPoolStripes = 8
+
+type modPoolStripe struct {
+	mu   sync.Mutex
+	mods []*childModule
+	_    [40]byte // pad to a cache line to avoid false sharing
+}
 
 type libre2ABI struct {
 	cre2New                   lazyFunction
@@ -94,6 +106,9 @@ type childModule struct {
 	// holding this module.
 	scratchPtr  uint32
 	scratchSize uint32
+
+	// stripe is the pool stripe this module was checked out from.
+	stripe uint32
 }
 
 func createChildModule(ctx context.Context, rt wazero.Runtime, root api.Module) *childModule {
@@ -190,35 +205,34 @@ func getChildModule(ctx context.Context) *childModule {
 	wasmInitOnce.Do(func() {
 		initWASM(ctx)
 	})
-	if cm := popChildModule(); cm != nil {
-		return cm
+	start := atomic.AddUint32(&nextStripe, 1)
+	for i := uint32(0); i < modPoolStripes; i++ {
+		st := &modPools[(start+i)%modPoolStripes]
+		st.mu.Lock()
+		if n := len(st.mods); n > 0 {
+			cm := st.mods[n-1]
+			st.mods[n-1] = nil
+			st.mods = st.mods[:n-1]
+			st.mu.Unlock()
+			cm.stripe = (start + i) % modPoolStripes
+			return cm
+		}
+		st.mu.Unlock()
 	}
 
+	// Module instantiation mutates shared runtime state; serialize creation.
 	modCreateMu.Lock()
 	defer modCreateMu.Unlock()
-	if cm := popChildModule(); cm != nil {
-		return cm
-	}
-	return createChildModule(ctx, wasmRT, rootMod)
+	cm := createChildModule(ctx, wasmRT, rootMod)
+	cm.stripe = start % modPoolStripes
+	return cm
 }
 
 func putChildModule(cm *childModule) {
-	modPoolMu.Lock()
-	modPool = append(modPool, cm)
-	modPoolMu.Unlock()
-}
-
-func popChildModule() *childModule {
-	modPoolMu.Lock()
-	defer modPoolMu.Unlock()
-	n := len(modPool)
-	if n == 0 {
-		return nil
-	}
-	cm := modPool[n-1]
-	modPool[n-1] = nil
-	modPool = modPool[:n-1]
-	return cm
+	st := &modPools[cm.stripe%modPoolStripes]
+	st.mu.Lock()
+	st.mods = append(st.mods, cm)
+	st.mu.Unlock()
 }
 
 func initWASM(ctx context.Context) {
