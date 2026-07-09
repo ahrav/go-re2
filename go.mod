@@ -13,3 +13,5 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
 )
+
+replace github.com/tetratelabs/wazero => github.com/ahrav/wazero v0.0.0-20260709011539-dbcb4ca05c5f
