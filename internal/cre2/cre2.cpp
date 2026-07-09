@@ -255,11 +255,21 @@ cre2_match (const cre2_regexp_t *re , const char *text,
 	    cre2_string_t *match, int nmatch)
 {
   re2::StringPiece	text_re2(text, textlen);
-  std::vector<re2::StringPiece>	match_re2(nmatch);
+  // Avoid a heap allocation per call: submatch counts are almost always
+  // small (0 = boolean match, 1 = whole match, few = capture groups).
+  re2::StringPiece	match_stack[8];
+  std::vector<re2::StringPiece>	match_heap;
+  re2::StringPiece *	match_re2;
+  if (nmatch <= 8) {
+    match_re2 = match_stack;
+  } else {
+    match_heap.resize(nmatch);
+    match_re2 = match_heap.data();
+  }
   RE2::Anchor		anchor_re2 = to_cre2_anchor(anchor);
   bool			retval; // 0 for no match
 				// 1 for successful matching
-  retval = TO_CONST_RE2(re)->Match(text_re2, startpos, endpos, anchor_re2, match_re2.data(), nmatch);
+  retval = TO_CONST_RE2(re)->Match(text_re2, startpos, endpos, anchor_re2, match_re2, nmatch);
   if (retval) {
     for (int i=0; i<nmatch; i++) {
       match[i].data   = match_re2[i].data();
