@@ -21,7 +21,6 @@ import (
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/wasilibs/wazero-helpers/allocator"
 )
 
 var errFailedRead = errors.New("failed to read from wasm memory")
@@ -223,7 +222,14 @@ func popChildModule() *childModule {
 }
 
 func initWASM(ctx context.Context) {
-	ctx = experimental.WithMemoryAllocator(ctx, allocator.NewNonMoving())
+	// The guarded allocator over-reserves a PROT_NONE page past the memory
+	// maximum, which lets the (patched) runtime elide per-access bounds
+	// checks: stray accesses fault on the guard instead of reading host
+	// memory. Enable before the engine snapshots configuration.
+	if guardedAllocSupported && os.Getenv("WAZERO_UNSAFE_SKIP_BOUNDS") == "" {
+		os.Setenv("WAZERO_UNSAFE_SKIP_BOUNDS", "1")
+	}
+	ctx = experimental.WithMemoryAllocator(ctx, newGuardedNonMovingAllocator())
 
 	rtCfg := wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesThreads)
 	uc, err := os.UserCacheDir()
