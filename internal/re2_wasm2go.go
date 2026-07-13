@@ -92,10 +92,23 @@ func (cm *childModule) ensureScratch(size uint32) {
 	if newSize < 4096 {
 		newSize = 4096
 	}
+	// Allocate the replacement arena before releasing the old one. If the
+	// grow fails, cm is left untouched — still pointing at a valid arena —
+	// instead of stranding cm.scratchPtr on freed memory, which the
+	// finalizer would double-free once a panic here drops this module.
+	newPtr := uint32(cm.mod.Xmalloc(int32(newSize)))
+	if newPtr == 0 {
+		// wasi-libc's malloc returns 0 (it does not trap) when it cannot
+		// grow linear memory past the maximum. Fail before freeing the old
+		// arena so cm keeps pointing at a valid buffer, rather than
+		// committing a 0 pointer that a later allocate() would write through
+		// at offset 0.
+		panic("re2: scratch arena allocation failed (out of wasm memory)")
+	}
 	if cm.scratchPtr != 0 {
 		cm.mod.Xfree(int32(cm.scratchPtr))
 	}
-	cm.scratchPtr = uint32(cm.mod.Xmalloc(int32(newSize)))
+	cm.scratchPtr = newPtr
 	cm.scratchSize = newSize
 	// The arena moved: anything staged in it is gone.
 	cm.lastInput = ""
