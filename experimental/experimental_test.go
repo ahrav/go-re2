@@ -227,6 +227,44 @@ func BenchmarkSet(b *testing.B) {
 	})
 }
 
+func BenchmarkSetMatrix(b *testing.B) {
+	sets := []struct {
+		name  string
+		exprs []string
+	}{
+		{"simple", []string{`foo`, `bar[0-9]+`, `token_[A-Za-z0-9]{20}`, `(?i)secret`}},
+		{"complex", []string{
+			`(?i)[\w.-]{0,50}?(?:access|auth|api|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\x60'"\s;]|\\[nr]|$)`,
+			`\b(A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b`,
+			`ghp_[0-9a-zA-Z]{36}`,
+			`(?m)^([[:alpha:]_][[:alnum:]_]*)\s*=\s*(.+)$`,
+		}},
+	}
+	inputs := []struct {
+		name string
+		text string
+	}{
+		{"small", `prefix token_0123456789abcdefghij suffix`},
+		{"large", strings.Repeat("func scan(fragment string) { return }\n", 420) + `secret_token = "ghp_0123456789abcdefghijABCDEFGHIJ456789"`},
+	}
+
+	for _, setCase := range sets {
+		set, err := CompileSet(setCase.exprs)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, input := range inputs {
+			b.Run(setCase.name+"/"+input.name, func(b *testing.B) {
+				b.SetBytes(int64(len(input.text)))
+				b.ReportAllocs()
+				for range b.N {
+					set.FindAllString(input.text, -1)
+				}
+			})
+		}
+	}
+}
+
 func BenchmarkSetMatchWithFindSubmatch(b *testing.B) {
 	b.Run("set match", func(b *testing.B) {
 		set, err := CompileSet(goodRe)

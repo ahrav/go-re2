@@ -9,7 +9,7 @@ import (
 // (module pool, wasm malloc lock) is part of the real cost.
 
 func BenchmarkLeaksScanParallel(b *testing.B) {
-	re := MustCompile(leaksPatterns["generic"])
+	re := MustCompileBenchmark(leaksPatterns["generic"])
 	hs := leaksHaystack(16<<10, false)
 	b.SetBytes(int64(len(hs)))
 	b.ReportAllocs()
@@ -21,7 +21,7 @@ func BenchmarkLeaksScanParallel(b *testing.B) {
 }
 
 func BenchmarkLeaksMatchParallel(b *testing.B) {
-	re := MustCompile(leaksPatterns["generic"])
+	re := MustCompileBenchmark(leaksPatterns["generic"])
 	hs := leaksHaystack(4<<10, false)
 	b.SetBytes(int64(len(hs)))
 	b.ReportAllocs()
@@ -37,7 +37,7 @@ func BenchmarkLeaksMatchParallel(b *testing.B) {
 // Small haystack parallel: per-op overhead (malloc/free, pool) dominates over
 // DFA scan time, worst case for the wazero backend.
 func BenchmarkLeaksMatchParallelSmall(b *testing.B) {
-	re := MustCompile(leaksPatterns["github-pat"])
+	re := MustCompileBenchmark(leaksPatterns["github-pat"])
 	hs := leaksHaystack(256, false)
 	b.SetBytes(int64(len(hs)))
 	b.ReportAllocs()
