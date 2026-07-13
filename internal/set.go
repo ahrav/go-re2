@@ -108,7 +108,7 @@ func (set *Set) findAll(alloc *allocation, cs cString, n int, deliver func(match
 	matchArr := alloc.newCStringArray(n)
 	defer matchArr.free()
 
-	matchedCount := setMatch(set, cs, matchArr.ptr, n)
+	matchedCount := setMatch(set, alloc, cs, matchArr.ptr, n)
 	matches := alloc.read(matchArr.ptr, n*4)
 	for i := 0; i < matchedCount && i < n; i++ {
 		deliver(int(binary.LittleEndian.Uint32(matches[i*4:])))
