@@ -1219,7 +1219,7 @@ func (m *Module) fn29(v0 int32) int32 {
 	t5 := m.fn28(t1+i32(1172), t4)
 	return t5
 }
-func (m *Module) fn30(v0, v1, v2 int32) int32 {
+func (m *Module) fn30Generated(v0, v1, v2 int32) int32 { // overridden in hotpatch.go
 	var v3 int32
 	var v4 int32
 	var v5 int32
