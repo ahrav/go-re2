@@ -97,10 +97,11 @@ type childModule struct {
 	functions  map[string]api.Function
 
 	// Pre-resolved hot-path functions to avoid per-call map lookups.
-	fnMalloc api.Function
-	fnFree   api.Function
-	fnMatch  api.Function
-	matchArg [8]uint64
+	fnMalloc   api.Function
+	fnFree     api.Function
+	fnMatch    api.Function
+	fnSetMatch api.Function
+	callArg    [8]uint64
 
 	// Persistent scratch arena in wasm linear memory, reused across
 	// operations. Grown geometrically; owned exclusively by the goroutine
@@ -156,6 +157,7 @@ func createChildModule(ctx context.Context, rt wazero.Runtime, root api.Module) 
 		fnMalloc:   child.ExportedFunction("malloc"),
 		fnFree:     child.ExportedFunction("free"),
 		fnMatch:    child.ExportedFunction("cre2_match"),
+		fnSetMatch: child.ExportedFunction("cre2_set_match"),
 	}
 	runtime.SetFinalizer(ret, func(obj interface{}) {
 		if cm, ok := obj.(*childModule); ok {
@@ -442,7 +444,7 @@ func release(re *Regexp) {
 func match(re *Regexp, alloc *allocation, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
 	// Call through the operation's checked-out module directly: avoids a
 	// second pool pop/push and function-map lookup per match call.
-	callStack := &alloc.cm.matchArg
+	callStack := &alloc.cm.callArg
 	callStack[0] = uint64(re.ptr)
 	callStack[1] = uint64(s.ptr)
 	callStack[2] = uint64(s.length)
@@ -458,7 +460,7 @@ func match(re *Regexp, alloc *allocation, s cString, matchesPtr wasmPtr, nMatche
 }
 
 func matchFrom(re *Regexp, alloc *allocation, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
-	callStack := &alloc.cm.matchArg
+	callStack := &alloc.cm.callArg
 	callStack[0] = uint64(re.ptr)
 	callStack[1] = uint64(s.ptr)
 	callStack[2] = uint64(s.length)
@@ -633,13 +635,17 @@ func setCompile(set *Set) int32 {
 	return int32(res)
 }
 
-func setMatch(set *Set, cs cString, matchedPtr wasmPtr, nMatch int) int {
-	ctx := context.Background()
-	res, err := set.abi.cre2SetMatch.Call5(ctx, uint64(set.ptr), uint64(cs.ptr), uint64(cs.length), uint64(matchedPtr), uint64(nMatch))
-	if err != nil {
+func setMatch(set *Set, alloc *allocation, cs cString, matchedPtr wasmPtr, nMatch int) int {
+	callStack := &alloc.cm.callArg
+	callStack[0] = uint64(set.ptr)
+	callStack[1] = uint64(cs.ptr)
+	callStack[2] = uint64(cs.length)
+	callStack[3] = uint64(matchedPtr)
+	callStack[4] = uint64(nMatch)
+	if err := alloc.cm.fnSetMatch.CallWithStack(context.Background(), callStack[:5]); err != nil {
 		panic(err)
 	}
-	return int(res)
+	return int(callStack[0])
 }
 
 func deleteSet(abi *libre2ABI, setPtr wasmPtr) {
