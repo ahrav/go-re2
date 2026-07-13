@@ -48,6 +48,10 @@ type childModule struct {
 	tlsBasePtr  uint32
 	scratchPtr  uint32
 	scratchSize uint32
+	// lastInput caches the string staged at the arena base by the previous
+	// operation on this module (identity: pointer+length of an immutable,
+	// referenced string). Matching stages skip the copy into linear memory.
+	lastInput string
 }
 
 func createChildModule(root *wasm2go.Module) *childModule {
@@ -93,6 +97,8 @@ func (cm *childModule) ensureScratch(size uint32) {
 	}
 	cm.scratchPtr = uint32(cm.mod.Xmalloc(int32(newSize)))
 	cm.scratchSize = newSize
+	// The arena moved: anything staged in it is gone.
+	cm.lastInput = ""
 }
 
 func getChildModule() *childModule {
@@ -477,7 +483,20 @@ func (a *allocation) writeString(s string) wasmPtr {
 }
 
 func (a *allocation) newCString(s string) cString {
+	// Fast path: the previous operation on this module staged the same string
+	// at the arena base; skip the copy (see childModule.lastInput).
+	if a.nextIdx == 0 && len(s) > 0 && len(s) == len(a.cm.lastInput) &&
+		unsafe.StringData(s) == unsafe.StringData(a.cm.lastInput) {
+		a.nextIdx = uint32(len(s))
+		return cString{ptr: a.bufPtr, length: len(s)}
+	}
+	first := a.nextIdx == 0
 	ptr := a.writeString(s)
+	if first && len(s) > 0 {
+		a.cm.lastInput = s
+	} else if first {
+		a.cm.lastInput = ""
+	}
 	return cString{
 		ptr:    ptr,
 		length: len(s),
@@ -485,6 +504,11 @@ func (a *allocation) newCString(s string) cString {
 }
 
 func (a *allocation) newCStringFromBytes(s []byte) cString {
+	// []byte contents are mutable, so they can never be identity-cached; a
+	// staging at the arena base also clobbers whatever string was cached.
+	if a.nextIdx == 0 {
+		a.cm.lastInput = ""
+	}
 	ptr := a.write(s)
 	return cString{
 		ptr:    ptr,
