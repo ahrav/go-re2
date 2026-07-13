@@ -14,4 +14,4 @@ require (
 	github.com/stretchr/testify v1.10.0 // indirect
 )
 
-replace github.com/tetratelabs/wazero => github.com/ahrav/wazero v0.0.0-20260713035823-9b417cb5f415
+replace github.com/tetratelabs/wazero => github.com/ahrav/wazero v0.0.0-20260713063003-6a42f831ebed
