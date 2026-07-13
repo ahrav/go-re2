@@ -241,7 +241,7 @@ func initWASM(ctx context.Context) {
 	// maximum, which lets the (patched) runtime elide per-access bounds
 	// checks: stray accesses fault on the guard instead of reading host
 	// memory. Enable before the engine snapshots configuration.
-	if guardedAllocSupported && os.Getenv("WAZERO_UNSAFE_SKIP_BOUNDS") == "" {
+	if guardedAllocSupported && unsafe.Sizeof(uintptr(0)) >= 8 && os.Getenv("WAZERO_UNSAFE_SKIP_BOUNDS") == "" {
 		os.Setenv("WAZERO_UNSAFE_SKIP_BOUNDS", "1")
 	}
 	ctx = experimental.WithMemoryAllocator(ctx, newGuardedNonMovingAllocator())
