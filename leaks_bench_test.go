@@ -41,7 +41,7 @@ func BenchmarkLeaksScan(b *testing.B) {
 		{"16KB", 16 << 10},
 	}
 	for name, pat := range leaksPatterns {
-		re := MustCompile(pat)
+		re := MustCompileBenchmark(pat)
 		for _, sz := range sizes {
 			for _, hit := range []bool{false, true} {
 				hs := leaksHaystack(sz.n, hit)
@@ -62,7 +62,7 @@ func BenchmarkLeaksScan(b *testing.B) {
 }
 
 func BenchmarkLeaksMatchMiss(b *testing.B) {
-	re := MustCompile(leaksPatterns["generic"])
+	re := MustCompileBenchmark(leaksPatterns["generic"])
 	hs := leaksHaystack(16<<10, false)
 	b.SetBytes(int64(len(hs)))
 	b.ReportAllocs()
