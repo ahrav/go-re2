@@ -44,8 +44,10 @@ var nilWasmPtr = wasmPtr(0)
 var prevTID uint32
 
 type childModule struct {
-	mod        *wasm2go.Module
-	tlsBasePtr uint32
+	mod         *wasm2go.Module
+	tlsBasePtr  uint32
+	scratchPtr  uint32
+	scratchSize uint32
 }
 
 func createChildModule(root *wasm2go.Module) *childModule {
@@ -64,10 +66,33 @@ func createChildModule(root *wasm2go.Module) *childModule {
 	ret := &childModule{mod: child, tlsBasePtr: ptr}
 	runtime.SetFinalizer(ret, func(obj interface{}) {
 		if cm, ok := obj.(*childModule); ok {
+			if cm.scratchPtr != 0 {
+				cm.mod.Xfree(int32(cm.scratchPtr))
+			}
 			cm.mod.Xfree(int32(cm.tlsBasePtr))
 		}
 	})
 	return ret
+}
+
+// ensureScratch keeps one geometrically grown arena per child module. The
+// module is checked out exclusively while the arena is in use.
+func (cm *childModule) ensureScratch(size uint32) {
+	if cm.scratchPtr != 0 && cm.scratchSize >= size {
+		return
+	}
+	newSize := cm.scratchSize * 2
+	if newSize < size {
+		newSize = size
+	}
+	if newSize < 4096 {
+		newSize = 4096
+	}
+	if cm.scratchPtr != 0 {
+		cm.mod.Xfree(int32(cm.scratchPtr))
+	}
+	cm.scratchPtr = uint32(cm.mod.Xmalloc(int32(newSize)))
+	cm.scratchSize = newSize
 }
 
 func getChildModule() *childModule {
@@ -116,11 +141,19 @@ func newABI() *libre2ABI {
 }
 
 func (abi *libre2ABI) startOperation(memorySize int) allocation {
-	return abi.reserve(uint32(memorySize))
+	// Keep one module for the whole operation so its TLS/stack and scratch
+	// arena cover allocation, matching, and result reads as one ownership unit.
+	cm := getChildModule()
+	cm.ensureScratch(uint32(memorySize))
+	return allocation{
+		size:   uint32(memorySize),
+		bufPtr: wasmPtr(cm.scratchPtr),
+		cm:     cm,
+	}
 }
 
 func (abi *libre2ABI) endOperation(a allocation) {
-	a.free()
+	putChildModule(a.cm)
 }
 
 func withModule(fn func(*wasm2go.Module) uint64) uint64 {
@@ -214,20 +247,12 @@ func release(re *Regexp) {
 	deleteRE(re.abi, re.ptr)
 }
 
-func match(re *Regexp, _ *allocation, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
-	res := withModule(func(m *wasm2go.Module) uint64 {
-		return uint64(m.Xcre2_match(int32(re.ptr), int32(s.ptr), int32(s.length), 0, int32(s.length), 0, int32(matchesPtr), int32(nMatches)))
-	})
-
-	return res == 1
+func match(re *Regexp, alloc *allocation, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
+	return alloc.cm.mod.Xcre2_match(int32(re.ptr), int32(s.ptr), int32(s.length), 0, int32(s.length), 0, int32(matchesPtr), int32(nMatches)) == 1
 }
 
-func matchFrom(re *Regexp, _ *allocation, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
-	res := withModule(func(m *wasm2go.Module) uint64 {
-		return uint64(m.Xcre2_match(int32(re.ptr), int32(s.ptr), int32(s.length), int32(startPos), int32(s.length), 0, int32(matchesPtr), int32(nMatches)))
-	})
-
-	return res == 1
+func matchFrom(re *Regexp, alloc *allocation, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
+	return alloc.cm.mod.Xcre2_match(int32(re.ptr), int32(s.ptr), int32(s.length), int32(startPos), int32(s.length), 0, int32(matchesPtr), int32(nMatches)) == 1
 }
 
 func readMatch(alloc *allocation, cs cString, matchPtr wasmPtr, dstCap []int) []int {
@@ -366,11 +391,8 @@ func setCompile(set *Set) int32 {
 	return int32(res)
 }
 
-func setMatch(set *Set, _ *allocation, cs cString, matchedPtr wasmPtr, nMatch int) int {
-	res := withModule(func(m *wasm2go.Module) uint64 {
-		return uint64(m.Xcre2_set_match(int32(set.ptr), int32(cs.ptr), int32(cs.length), int32(matchedPtr), int32(nMatch)))
-	})
-	return int(res)
+func setMatch(set *Set, alloc *allocation, cs cString, matchedPtr wasmPtr, nMatch int) int {
+	return int(alloc.cm.mod.Xcre2_set_match(int32(set.ptr), int32(cs.ptr), int32(cs.length), int32(matchedPtr), int32(nMatch)))
 }
 
 func deleteSet(abi *libre2ABI, setPtr wasmPtr) {
@@ -425,21 +447,7 @@ type allocation struct {
 	size    uint32
 	bufPtr  wasmPtr
 	nextIdx uint32
-	abi     *libre2ABI
-}
-
-func (abi *libre2ABI) reserve(size uint32) allocation {
-	ptr := malloc(abi, size)
-	return allocation{
-		size:    size,
-		bufPtr:  ptr,
-		nextIdx: 0,
-		abi:     abi,
-	}
-}
-
-func (a *allocation) free() {
-	free(a.abi, a.bufPtr)
+	cm      *childModule
 }
 
 func (a *allocation) allocate(size uint32) wasmPtr {
