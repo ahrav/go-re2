@@ -1,6 +1,9 @@
 package wasm2go
 
-import "bytes"
+import (
+	"bytes"
+	"unsafe"
+)
 
 // Hand-written overrides for hot wasi-libc primitives in the generated module.
 // The generated counterparts are renamed with a "Generated" suffix by
@@ -17,8 +20,16 @@ func (m *Module) fn30(v0, v1, v2 int32) int32 {
 	if v2 == 0 {
 		return 0
 	}
-	mem := *m.memory
-	s := mem[int64(uint32(v0)) : int64(uint32(v0))+int64(uint32(v2))]
+	var s []byte
+	if unsafeMemFast {
+		// Unchecked construction mirroring load8u: the scan window of any
+		// well-formed memchr call lies inside the guarded reservation, and a
+		// wild one faults there exactly like a direct access would.
+		s = unsafe.Slice((*byte)(unsafe.Add(m.mbase(), uintptr(uint32(v0)))), uint32(v2))
+	} else {
+		mem := *m.memory
+		s = mem[int64(uint32(v0)) : int64(uint32(v0))+int64(uint32(v2))]
+	}
 	if i := bytes.IndexByte(s, byte(v1)); i >= 0 {
 		return v0 + int32(i)
 	}
