@@ -339,7 +339,10 @@ func (abi *libre2ABI) startOperation(memorySize int) allocation {
 	// replaces per-operation malloc/free.
 	ctx := context.Background()
 	cm := getChildModule(ctx)
-	cm.ensureScratch(ctx, uint32(memorySize))
+	// +8 reserves a tail slot used by match() to promote boolean matches to
+	// nmatch=1 (see match below); the bump allocator never hands it out
+	// because allocation.size stays memorySize.
+	cm.ensureScratch(ctx, uint32(memorySize)+8)
 	return allocation{
 		size:   uint32(memorySize),
 		bufPtr: wasmPtr(cm.scratchPtr),
@@ -444,6 +447,17 @@ func release(re *Regexp) {
 func match(re *Regexp, alloc *allocation, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
 	// Call through the operation's checked-out module directly: avoids a
 	// second pool pop/push and function-map lookup per match call.
+	//
+	// Boolean matches (nMatches == 0) are promoted to nmatch=1 aimed at the
+	// scratch tail slot: RE2 compiles a separate DFA-search template for the
+	// no-submatch case which the wazero JIT runs measurably slower (67.5us vs
+	// 58.7us per 16KB miss, 34.3us vs 30.4us per hit), and the match decision
+	// is identical — the extra 8-byte (ptr,len) write on hit is scribbled
+	// into scratch this module owns.
+	if nMatches == 0 && matchesPtr == nilWasmPtr {
+		matchesPtr = wasmPtr(alloc.cm.scratchPtr + alloc.cm.scratchSize - 8)
+		nMatches = 1
+	}
 	callStack := &alloc.cm.callArg
 	callStack[0] = uint64(re.ptr)
 	callStack[1] = uint64(s.ptr)
