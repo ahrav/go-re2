@@ -1,5 +1,3 @@
-//go:build re2_test_exhaustive
-
 package re2
 
 import (
@@ -322,6 +320,10 @@ func same(x, y []int) bool {
 // POSIX regular expression tests collected by Glenn Fowler
 // at http://www2.research.att.com/~astopen/testregex/testregex.html.
 func TestFowler(t *testing.T) {
+	if !exhaustiveTestsEnabled {
+		t.Skip("enable with -tags=re2_test_exhaustive")
+	}
+	notab = MustCompilePOSIX(`[^\t]+`)
 	files, err := filepath.Glob("testdata/*.dat")
 	if err != nil {
 		t.Fatal(err)
@@ -333,10 +335,6 @@ func TestFowler(t *testing.T) {
 }
 
 var notab *Regexp
-
-func init() {
-	notab = MustCompilePOSIX(`[^\t]+`)
-}
 
 func testFowler(t *testing.T, file string) {
 	f, err := os.Open(file)
