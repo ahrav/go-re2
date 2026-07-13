@@ -41,7 +41,6 @@ var (
 
 	wasmInitOnce sync.Once
 	modPools     [modPoolStripes]modPoolStripe // striped LIFO pools of reusable child modules
-	nextStripe   uint32
 	modCreateMu  sync.Mutex
 )
 
@@ -230,7 +229,18 @@ func getChildModule(ctx context.Context) *childModule {
 	wasmInitOnce.Do(func() {
 		initWASM(ctx)
 	})
-	start := atomic.AddUint32(&nextStripe, 1)
+	// Stripe choice is goroutine-affine: the address of a stack local is
+	// stable for a goroutine's lifetime (barring stack moves) and distinct
+	// across goroutines, so one goroutine keeps hitting the same stripe and
+	// (LIFO) tends to get its previous module back — its scratch arena is
+	// already sized and holds the identity-cached input. This also removes
+	// the globally contended nextStripe atomic from the hot path. Goroutine
+	// stacks come from size-aligned spans, so the raw address is highly
+	// regular; a Fibonacci multiplicative hash decorrelates it before the
+	// stripe mod (otherwise all goroutines could collide on one stripe and
+	// serialize).
+	var stackMark byte
+	start := uint32((uint64(uintptr(unsafe.Pointer(&stackMark))) * 0x9E3779B97F4A7C15) >> 32)
 	for i := uint32(0); i < modPoolStripes; i++ {
 		st := &modPools[(start+i)%modPoolStripes]
 		st.mu.Lock()
