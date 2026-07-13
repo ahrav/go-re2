@@ -14,8 +14,18 @@ type Memory struct {
 	Buf []byte
 	Max int64
 	com int
-	mu  sync.Mutex
+	// mapping is the full reservation including the guard tail; Buf's cap is
+	// limited to the usable region so commits can never touch the guard.
+	mapping []byte
+	mu      sync.Mutex
 }
+
+// guardBytes is a PROT_NONE tail reserved past the maximum linear-memory
+// size. Together with a full max-size reservation it makes any
+// base+uint32-offset+small-constant access either land in the wasm memory or
+// fault on a protected page, which is what lets the transpiled module elide
+// explicit bounds checks on 64-bit unix (see internal/wasm/hotmem.go).
+const guardBytes = 65536
 
 func (m *Memory) Slice() *[]byte {
 	return &m.Buf
@@ -47,19 +57,23 @@ func (m *Memory) allocate(maxSz uint64) {
 	rnd := uint64(unix.Getpagesize() - 1)
 	res := (maxSz + rnd) &^ rnd
 
-	if res > math.MaxInt {
-		// This ensures int(res) overflows to a negative value,
+	// Reserve a guard tail past the usable maximum (never committed).
+	total := res + guardBytes
+	if total > math.MaxInt || total < res {
+		// This ensures int(total) overflows to a negative value,
 		// and unix.Mmap returns EINVAL.
-		res = math.MaxUint64
+		total = math.MaxUint64
 	}
 
-	// Reserve res bytes of address space, to ensure we won't need to move it.
+	// Reserve total bytes of address space, to ensure we won't need to move it.
 	// A protected, private, anonymous mapping should not commit memory.
-	b, err := unix.Mmap(-1, 0, int(res), unix.PROT_NONE, unix.MAP_PRIVATE|unix.MAP_ANON)
+	b, err := unix.Mmap(-1, 0, int(total), unix.PROT_NONE, unix.MAP_PRIVATE|unix.MAP_ANON)
 	if err != nil {
 		panic(err)
 	}
-	m.Buf = b[:0]
+	m.mapping = b
+	// Usable capacity excludes the guard so reallocate can never commit it.
+	m.Buf = b[:0:res]
 }
 
 func (m *Memory) reallocate(size uint64) {
@@ -87,7 +101,8 @@ func (m *Memory) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	err := unix.Munmap(m.Buf[:cap(m.Buf)])
+	err := unix.Munmap(m.mapping)
+	m.mapping = nil
 	m.Buf = nil
 	m.com = 0
 	return fmt.Errorf("memory: unmap failed: %w", err)
