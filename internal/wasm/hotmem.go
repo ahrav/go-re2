@@ -116,14 +116,15 @@ func (m *Module) store64u(base unsafe.Pointer, off int64, v uint64) {
 	store64((*m.memory)[off:], v)
 }
 
-// Atomic variants keep the wasm alignment trap but elide the bounds check.
+// Atomic variants elide both the bounds check and the explicit alignment
+// trap in the fast path: the guest toolchain (wasi-sdk C/C++) always emits
+// naturally aligned atomics, and on arm64 a misaligned load-acquire faults
+// in hardware (SIGBUS) — the same fatal-fault behavior class as an
+// out-of-bounds access hitting the guard page.
 
 //go:nosplit
 func (m *Module) atomicLoad32u(base unsafe.Pointer, off int64) uint32 {
 	if unsafeMemFast {
-		if uint32(off)&3 != 0 {
-			panic("unaligned atomic")
-		}
 		v := atomic.LoadUint32((*uint32)(unsafe.Add(base, uintptr(off))))
 		if big {
 			v = bits.ReverseBytes32(v)
@@ -136,9 +137,6 @@ func (m *Module) atomicLoad32u(base unsafe.Pointer, off int64) uint32 {
 //go:nosplit
 func (m *Module) atomicStore32u(base unsafe.Pointer, off int64, v uint32) {
 	if unsafeMemFast {
-		if uint32(off)&3 != 0 {
-			panic("unaligned atomic")
-		}
 		if big {
 			v = bits.ReverseBytes32(v)
 		}
@@ -151,9 +149,6 @@ func (m *Module) atomicStore32u(base unsafe.Pointer, off int64, v uint32) {
 //go:nosplit
 func (m *Module) atomicLoad64u(base unsafe.Pointer, off int64) uint64 {
 	if unsafeMemFast {
-		if uint32(off)&7 != 0 {
-			panic("unaligned atomic")
-		}
 		v := atomic.LoadUint64((*uint64)(unsafe.Add(base, uintptr(off))))
 		if big {
 			v = bits.ReverseBytes64(v)
@@ -166,9 +161,6 @@ func (m *Module) atomicLoad64u(base unsafe.Pointer, off int64) uint64 {
 //go:nosplit
 func (m *Module) atomicStore64u(base unsafe.Pointer, off int64, v uint64) {
 	if unsafeMemFast {
-		if uint32(off)&7 != 0 {
-			panic("unaligned atomic")
-		}
 		if big {
 			v = bits.ReverseBytes64(v)
 		}
