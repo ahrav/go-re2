@@ -239,13 +239,9 @@ func putChildModule(cm *childModule) {
 }
 
 func initWASM(ctx context.Context) {
-	// The guarded allocator over-reserves a PROT_NONE page past the memory
-	// maximum, which lets the (patched) runtime elide per-access bounds
-	// checks: stray accesses fault on the guard instead of reading host
-	// memory. Enable before the engine snapshots configuration.
-	if guardedAllocSupported && unsafe.Sizeof(uintptr(0)) >= 8 && os.Getenv("WAZERO_UNSAFE_SKIP_BOUNDS") == "" {
-		os.Setenv("WAZERO_UNSAFE_SKIP_BOUNDS", "1")
-	}
+	// Patched wazero versions detect this allocator's explicit unsafe
+	// capability and scope bounds-check elision to this runtime. Upstream
+	// versions use the same allocator but keep their normal bounds checks.
 	ctx = experimental.WithMemoryAllocator(ctx, newGuardedNonMovingAllocator())
 
 	rtCfg := wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesThreads)
