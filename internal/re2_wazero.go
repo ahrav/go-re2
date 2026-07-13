@@ -100,6 +100,7 @@ type childModule struct {
 	fnMalloc api.Function
 	fnFree   api.Function
 	fnMatch  api.Function
+	matchArg [8]uint64
 
 	// Persistent scratch arena in wasm linear memory, reused across
 	// operations. Grown geometrically; owned exclusively by the goroutine
@@ -441,7 +442,7 @@ func release(re *Regexp) {
 func match(re *Regexp, alloc *allocation, s cString, matchesPtr wasmPtr, nMatches uint32) bool {
 	// Call through the operation's checked-out module directly: avoids a
 	// second pool pop/push and function-map lookup per match call.
-	var callStack [8]uint64
+	callStack := &alloc.cm.matchArg
 	callStack[0] = uint64(re.ptr)
 	callStack[1] = uint64(s.ptr)
 	callStack[2] = uint64(s.length)
@@ -457,7 +458,7 @@ func match(re *Regexp, alloc *allocation, s cString, matchesPtr wasmPtr, nMatche
 }
 
 func matchFrom(re *Regexp, alloc *allocation, s cString, startPos int, matchesPtr wasmPtr, nMatches uint32) bool {
-	var callStack [8]uint64
+	callStack := &alloc.cm.matchArg
 	callStack[0] = uint64(re.ptr)
 	callStack[1] = uint64(s.ptr)
 	callStack[2] = uint64(s.length)
