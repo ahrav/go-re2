@@ -37,7 +37,7 @@ func main() {
 			}
 			cmd.Exec(a, fmt.Sprintf(`go test -v -timeout=20m %s -tags "%s" ./...`, race, strings.Join(suiteTags, ",")))
 			if splitExhaustive {
-				cmd.Exec(a, fmt.Sprintf(`go test -v -timeout=10m -tags "%s" -run "TestRE2Exhaustive|TestRE2Search|TestFowler" .`, strings.Join(tags, ",")))
+				cmd.Exec(a, fmt.Sprintf(`go test -v -timeout=10m -tags "%s" -run "TestRE2Exhaustive|TestFowler" .`, strings.Join(tags, ",")))
 			}
 			if mode == "" {
 				cmd.Exec(a, fmt.Sprintf("go build -o %s ./internal/e2e", filepath.Join("out", "test.wasm")), cmd.Env("GOOS", "wasip1"), cmd.Env("GOARCH", "wasm"))
